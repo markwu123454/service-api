@@ -84,7 +84,7 @@ async def register(specs: NodeSpecs, request: Request):
                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
                 'online', now(), now()
             )
-            ON CONFLICT (hostname)
+            ON CONFLICT (mac_address)
             DO UPDATE SET
                 ip_address = EXCLUDED.ip_address,
                 mac_address = EXCLUDED.mac_address,
