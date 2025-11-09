@@ -1,7 +1,7 @@
 from datetime import datetime
 import os
 import asyncpg
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -41,7 +41,6 @@ class NodeSpecs(BaseModel):
 
 
 
-
 @app.get("/")
 async def root():
     return "hello world"
@@ -51,61 +50,100 @@ async def ping():
     return {"ping": "pong"}
 
 @app.post("/heartbeat")
-async def heartbeat(request: Request, hostname: str):
+async def heartbeat(request: Request, id: str):
     """Update only last_heartbeat and status for an existing node."""
     pool = request.app.state.db_pool
     async with pool.acquire() as conn:
-        await conn.execute(
+        result = await conn.execute(
             """
             UPDATE nodes
             SET last_heartbeat = $2,
                 status = 'online'
-            WHERE hostname = $1
+            WHERE id = $1
             """,
-            hostname,
+            id,
             datetime.utcnow(),
         )
-    return {"status": "updated", "hostname": hostname}
+
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Node ID not found")
+    return {"status": "updated", "id": id}
 
 
 @app.post("/register")
 async def register(specs: NodeSpecs, request: Request):
-    """Insert or update full device specifications."""
+    """Insert or update full device specifications and return the row ID."""
+
+    # --- Reject restricted fields ---
+    forbidden = [f for f in ("owner", "notes", "location") if getattr(specs, f)]
+    if forbidden:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The following fields must be empty: {', '.join(forbidden)}"
+        )
+
     pool = request.app.state.db_pool
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO nodes (
-                hostname, ip_address, mac_address, os,
-                cpu_model, cpu_cores, memory_gb, storage_gb,
-                gpu_model, location, owner, notes,
-                status, last_heartbeat, last_checked
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-                'online', now(), now()
+        if getattr(specs, "id", None):
+            # --- Update or insert by ID ---
+            row = await conn.fetchrow(
+                """
+                INSERT INTO nodes (
+                    id, hostname, ip_address, mac_address, os,
+                    cpu_model, cpu_cores, memory_gb, storage_gb,
+                    gpu_model, location, owner, notes,
+                    status, last_heartbeat, last_checked
+                )
+                VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'','','',
+                    'online', now(), now()
+                )
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    hostname = EXCLUDED.hostname,
+                    ip_address = EXCLUDED.ip_address,
+                    mac_address = EXCLUDED.mac_address,
+                    os = EXCLUDED.os,
+                    cpu_model = EXCLUDED.cpu_model,
+                    cpu_cores = EXCLUDED.cpu_cores,
+                    memory_gb = EXCLUDED.memory_gb,
+                    storage_gb = EXCLUDED.storage_gb,
+                    gpu_model = EXCLUDED.gpu_model,
+                    location = '',
+                    owner = '',
+                    notes = '',
+                    status = 'online',
+                    last_heartbeat = now(),
+                    last_checked = now()
+                RETURNING id
+                """,
+                specs.id, specs.hostname, specs.ip_address, specs.mac_address, specs.os,
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb,
+                specs.gpu_model,
             )
-            ON CONFLICT (mac_address)
-            DO UPDATE SET
-                ip_address = EXCLUDED.ip_address,
-                mac_address = EXCLUDED.mac_address,
-                os = EXCLUDED.os,
-                cpu_model = EXCLUDED.cpu_model,
-                cpu_cores = EXCLUDED.cpu_cores,
-                memory_gb = EXCLUDED.memory_gb,
-                storage_gb = EXCLUDED.storage_gb,
-                gpu_model = EXCLUDED.gpu_model,
-                location = EXCLUDED.location,
-                owner = EXCLUDED.owner,
-                notes = EXCLUDED.notes,
-                status = 'online',
-                last_heartbeat = now(),
-                last_checked = now()
-            """,
-            specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-            specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb,
-            specs.gpu_model, specs.location, specs.owner, specs.notes,
-        )
-    return {"status": "registered", "hostname": specs.hostname}
+        else:
+            # --- Always create a new entry ---
+            row = await conn.fetchrow(
+                """
+                INSERT INTO nodes (
+                    hostname, ip_address, mac_address, os,
+                    cpu_model, cpu_cores, memory_gb, storage_gb,
+                    gpu_model, location, owner, notes,
+                    status, last_heartbeat, last_checked
+                )
+                VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,'','','',
+                    'online', now(), now()
+                )
+                RETURNING id
+                """,
+                specs.hostname, specs.ip_address, specs.mac_address, specs.os,
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb,
+                specs.gpu_model,
+            )
+
+    return {"status": "registered", "hostname": specs.hostname, "id": row["id"]}
+
 
 
 @app.post("/online")
