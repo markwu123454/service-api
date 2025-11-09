@@ -34,6 +34,7 @@ class NodeSpecs(BaseModel):
     cpu_cores: int | None = None
     memory_gb: float | None = None
     storage_gb: float | None = None
+    drives: dict | None = None
     gpu_model: str | None = None
     location: str | None = None
     owner: str | None = None
@@ -90,12 +91,12 @@ async def register(specs: NodeSpecs, request: Request):
                 """
                 INSERT INTO nodes (
                     id, hostname, ip_address, mac_address, os,
-                    cpu_model, cpu_cores, memory_gb, storage_gb,
+                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
                     gpu_model, location, owner, notes,
                     status, last_heartbeat, last_checked
                 )
                 VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'','','',
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'','','',
                     'online', now(), now()
                 )
                 ON CONFLICT (id)
@@ -108,6 +109,7 @@ async def register(specs: NodeSpecs, request: Request):
                     cpu_cores = EXCLUDED.cpu_cores,
                     memory_gb = EXCLUDED.memory_gb,
                     storage_gb = EXCLUDED.storage_gb,
+                    drives = EXCLUDED.drives,
                     gpu_model = EXCLUDED.gpu_model,
                     location = '',
                     owner = '',
@@ -118,7 +120,7 @@ async def register(specs: NodeSpecs, request: Request):
                 RETURNING id
                 """,
                 specs.id, specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb,
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, specs.drives,
                 specs.gpu_model,
             )
         else:
@@ -127,18 +129,18 @@ async def register(specs: NodeSpecs, request: Request):
                 """
                 INSERT INTO nodes (
                     hostname, ip_address, mac_address, os,
-                    cpu_model, cpu_cores, memory_gb, storage_gb,
+                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
                     gpu_model, location, owner, notes,
                     status, last_heartbeat, last_checked
                 )
                 VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,'','','',
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'','','',
                     'online', now(), now()
                 )
                 RETURNING id
                 """,
                 specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb,
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, specs.drives,
                 specs.gpu_model,
             )
 
