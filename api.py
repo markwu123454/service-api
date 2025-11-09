@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+from typing import Dict
 import asyncpg
 from fastapi import FastAPI, Request, HTTPException
 from contextlib import asynccontextmanager
@@ -34,7 +35,7 @@ class NodeSpecs(BaseModel):
     cpu_cores: int | None = None
     memory_gb: float | None = None
     storage_gb: float | None = None
-    drives: dict | None = None
+    drives: Dict[str, float] | None = None
     gpu_model: str | None = None
     location: str | None = None
     owner: str | None = None
