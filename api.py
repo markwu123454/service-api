@@ -89,6 +89,8 @@ async def register(specs: NodeSpecs, request: Request):
     async with pool.acquire() as conn:
         if getattr(specs, "id", None):
             # --- Update or insert by ID ---
+            print("drives type:", type(specs.drives))
+            print("drives value:", specs.drives)
             row = await conn.fetchrow(
                 """
                 INSERT INTO nodes (
