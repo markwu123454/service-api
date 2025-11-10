@@ -11,6 +11,7 @@ from pydantic import BaseModel
 load_dotenv()
 DB_URL = os.getenv("DATABASE_URL")
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Starting up...")
@@ -23,8 +24,8 @@ async def lifespan(app: FastAPI):
     print("Shutting down...")
     await app.state.db_pool.close()
 
-app = FastAPI(lifespan=lifespan)
 
+app = FastAPI(lifespan=lifespan)
 
 
 class NodeSpecs(BaseModel):
@@ -43,14 +44,15 @@ class NodeSpecs(BaseModel):
     notes: str | None = None
 
 
-
 @app.get("/")
 async def root():
     return "hello world"
 
+
 @app.get("/ping")
 async def ping():
     return {"ping": "pong"}
+
 
 @app.post("/heartbeat")
 async def heartbeat(request: Request, id: str):
@@ -61,7 +63,7 @@ async def heartbeat(request: Request, id: str):
             """
             UPDATE nodes
             SET last_heartbeat = $2,
-                status = 'online'
+                status         = 'online'
             WHERE id = $1
             """,
             id,
@@ -89,58 +91,55 @@ async def register(specs: NodeSpecs, request: Request):
     async with pool.acquire() as conn:
         if getattr(specs, "id", None):
             # --- Update or insert by ID ---
-            print("drives type:", type(specs.drives))
-            print("drives value:", specs.drives)
             row = await conn.fetchrow(
                 """
-                INSERT INTO nodes (
-                    id, hostname, ip_address, mac_address, os,
-                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                    gpu_model, location, owner, notes,
-                    status, last_heartbeat, last_checked
-                )
-                VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'','','',
-                    'online', now(), now()
-                )
+                INSERT INTO nodes (id, hostname, ip_address, mac_address, os,
+                                   cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                                   gpu_model, location, owner, notes,
+                                   status, last_heartbeat, last_checked)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '', '', '',
+                        'online', now(), now())
                 ON CONFLICT (id)
-                DO UPDATE SET
-                    hostname = EXCLUDED.hostname,
-                    ip_address = EXCLUDED.ip_address,
-                    mac_address = EXCLUDED.mac_address,
-                    os = EXCLUDED.os,
-                    cpu_model = EXCLUDED.cpu_model,
-                    cpu_cores = EXCLUDED.cpu_cores,
-                    memory_gb = EXCLUDED.memory_gb,
-                    storage_gb = EXCLUDED.storage_gb,
-                    drives = EXCLUDED.drives,
-                    gpu_model = EXCLUDED.gpu_model,
-                    location = '',
-                    owner = '',
-                    notes = '',
-                    status = 'online',
-                    last_heartbeat = now(),
-                    last_checked = now()
+                    DO UPDATE SET hostname       = EXCLUDED.hostname,
+                                  ip_address     = EXCLUDED.ip_address,
+                                  mac_address    = EXCLUDED.mac_address,
+                                  os             = EXCLUDED.os,
+                                  cpu_model      = EXCLUDED.cpu_model,
+                                  cpu_cores      = EXCLUDED.cpu_cores,
+                                  memory_gb      = EXCLUDED.memory_gb,
+                                  storage_gb     = EXCLUDED.storage_gb,
+                                  drives         = EXCLUDED.drives,
+                                  gpu_model      = EXCLUDED.gpu_model,
+                                  location       = '',
+                                  owner          = '',
+                                  notes          = '',
+                                  status         = 'online',
+                                  last_heartbeat = now(),
+                                  last_checked   = now()
                 RETURNING id
                 """,
-                specs.id, specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, json.dumps(specs.drives),
+                specs.id,
+                specs.hostname,
+                specs.ip_address,
+                specs.mac_address,
+                specs.os,
+                specs.cpu_model,
+                specs.cpu_cores,
+                specs.memory_gb,
+                specs.storage_gb,
+                json.dumps(specs.drives),
                 specs.gpu_model,
             )
         else:
             # --- Always create a new entry ---
             row = await conn.fetchrow(
                 """
-                INSERT INTO nodes (
-                    hostname, ip_address, mac_address, os,
-                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                    gpu_model, location, owner, notes,
-                    status, last_heartbeat, last_checked
-                )
-                VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'','','',
-                    'online', now(), now()
-                )
+                INSERT INTO nodes (hostname, ip_address, mac_address, os,
+                                   cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                                   gpu_model, location, owner, notes,
+                                   status, last_heartbeat, last_checked)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', '', '',
+                        'online', now(), now())
                 RETURNING id
                 """,
                 specs.hostname, specs.ip_address, specs.mac_address, specs.os,
@@ -149,7 +148,6 @@ async def register(specs: NodeSpecs, request: Request):
             )
 
     return {"status": "registered", "hostname": specs.hostname, "id": row["id"]}
-
 
 
 @app.post("/online")
