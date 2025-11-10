@@ -143,7 +143,7 @@ async def register(specs: NodeSpecs, request: Request):
                 RETURNING id
                 """,
                 specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, specs.drives,
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, json.dumps(specs.drives),
                 specs.gpu_model,
             )
 
