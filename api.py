@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 import os
 from typing import Dict
@@ -121,7 +122,7 @@ async def register(specs: NodeSpecs, request: Request):
                 RETURNING id
                 """,
                 specs.id, specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, specs.drives,
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, json.dumps(specs.drives),
                 specs.gpu_model,
             )
         else:
