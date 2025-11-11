@@ -183,7 +183,7 @@ async def get_update(request: Request, hash: Optional[str] = Query(None)):
                LIMIT 1"""
         )
         if not row:
-            raise HTTPException(status_code=404, detail="No payload found")
+            raise HTTPException(status_code=503, detail="No payloads available yet")
 
         version = row["version"]
         code = row["code"]
