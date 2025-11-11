@@ -1,26 +1,37 @@
 import json
+import base64
+import hashlib
 from datetime import datetime
 import os
-from typing import Dict
+from typing import Dict, Optional
 import asyncpg
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from pathlib import Path
 
+# ---------------------------------------------------
+# Setup
+# ---------------------------------------------------
 load_dotenv()
 DB_URL = os.getenv("DATABASE_URL")
 
+BASE_DIR = Path(__file__).parent
+PUBLIC_KEY_PATH = BASE_DIR / "public.pem"
 
+VERSION_FALLBACK = "0.0.0"  # used if DB empty
+
+
+# ---------------------------------------------------
+# Database connection
+# ---------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Starting up...")
-
-    # Initialize connection pool
     app.state.db_pool = await asyncpg.create_pool(DB_URL)
-
     yield
-
     print("Shutting down...")
     await app.state.db_pool.close()
 
@@ -28,25 +39,40 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+# ---------------------------------------------------
+# Models
+# ---------------------------------------------------
 class NodeSpecs(BaseModel):
     hostname: str
     ip_address: str
-    mac_address: str | None = None
-    os: str | None = None
-    cpu_model: str | None = None
-    cpu_cores: int | None = None
-    memory_gb: float | None = None
-    storage_gb: float | None = None
-    drives: Dict[str, float] | None = None
-    gpu_model: str | None = None
-    location: str | None = None
-    owner: str | None = None
-    notes: str | None = None
+    mac_address: Optional[str] = None
+    os: Optional[str] = None
+    cpu_model: Optional[str] = None
+    cpu_cores: Optional[int] = None
+    memory_gb: Optional[float] = None
+    storage_gb: Optional[float] = None
+    drives: Optional[Dict[str, float]] = None
+    gpu_model: Optional[str] = None
+    location: Optional[str] = None
+    owner: Optional[str] = None
+    notes: Optional[str] = None
 
 
+# ---------------------------------------------------
+# Utility
+# ---------------------------------------------------
+def compute_hash(code: str) -> str:
+    """Compute base64 SHA256 hash of given code string."""
+    h = hashlib.sha256(code.encode("utf-8")).digest()
+    return base64.b64encode(h).decode()
+
+
+# ---------------------------------------------------
+# Endpoints
+# ---------------------------------------------------
 @app.get("/")
 async def root():
-    return "hello world"
+    return {"status": "ok"}
 
 
 @app.get("/ping")
@@ -69,7 +95,6 @@ async def heartbeat(request: Request, id: str):
             id,
             datetime.utcnow(),
         )
-
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Node ID not found")
     return {"status": "updated", "id": id}
@@ -78,8 +103,6 @@ async def heartbeat(request: Request, id: str):
 @app.post("/register")
 async def register(specs: NodeSpecs, request: Request):
     """Insert or update full device specifications and return the row ID."""
-
-    # --- Reject restricted fields ---
     forbidden = [f for f in ("owner", "notes", "location") if getattr(specs, f)]
     if forbidden:
         raise HTTPException(
@@ -90,66 +113,106 @@ async def register(specs: NodeSpecs, request: Request):
     pool = request.app.state.db_pool
     async with pool.acquire() as conn:
         if getattr(specs, "id", None):
-            # --- Update or insert by ID ---
+            query = """
+                    INSERT INTO nodes (id, hostname, ip_address, mac_address, os,
+                                       cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                                       gpu_model, location, owner, notes,
+                                       status, last_heartbeat, last_checked)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '', '', '',
+                            'online', now(), now())
+                    ON CONFLICT (id)
+                        DO UPDATE SET hostname=$2,
+                                      ip_address=$3,
+                                      mac_address=$4,
+                                      os=$5,
+                                      cpu_model=$6,
+                                      cpu_cores=$7,
+                                      memory_gb=$8,
+                                      storage_gb=$9,
+                                      drives=$10,
+                                      gpu_model=$11,
+                                      location='',
+                                      owner='',
+                                      notes='',
+                                      status='online',
+                                      last_heartbeat=now(),
+                                      last_checked=now()
+                    RETURNING id \
+                    """
             row = await conn.fetchrow(
-                """
-                INSERT INTO nodes (id, hostname, ip_address, mac_address, os,
-                                   cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                                   gpu_model, location, owner, notes,
-                                   status, last_heartbeat, last_checked)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '', '', '',
-                        'online', now(), now())
-                ON CONFLICT (id)
-                    DO UPDATE SET hostname       = EXCLUDED.hostname,
-                                  ip_address     = EXCLUDED.ip_address,
-                                  mac_address    = EXCLUDED.mac_address,
-                                  os             = EXCLUDED.os,
-                                  cpu_model      = EXCLUDED.cpu_model,
-                                  cpu_cores      = EXCLUDED.cpu_cores,
-                                  memory_gb      = EXCLUDED.memory_gb,
-                                  storage_gb     = EXCLUDED.storage_gb,
-                                  drives         = EXCLUDED.drives,
-                                  gpu_model      = EXCLUDED.gpu_model,
-                                  location       = '',
-                                  owner          = '',
-                                  notes          = '',
-                                  status         = 'online',
-                                  last_heartbeat = now(),
-                                  last_checked   = now()
-                RETURNING id
-                """,
-                specs.id,
-                specs.hostname,
-                specs.ip_address,
-                specs.mac_address,
-                specs.os,
-                specs.cpu_model,
-                specs.cpu_cores,
-                specs.memory_gb,
-                specs.storage_gb,
-                json.dumps(specs.drives),
-                specs.gpu_model,
+                query,
+                specs.id, specs.hostname, specs.ip_address, specs.mac_address,
+                specs.os, specs.cpu_model, specs.cpu_cores, specs.memory_gb,
+                specs.storage_gb, json.dumps(specs.drives), specs.gpu_model
             )
         else:
-            # --- Always create a new entry ---
+            query = """
+                    INSERT INTO nodes (hostname, ip_address, mac_address, os,
+                                       cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                                       gpu_model, location, owner, notes,
+                                       status, last_heartbeat, last_checked)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', '', '',
+                            'online', now(), now())
+                    RETURNING id \
+                    """
             row = await conn.fetchrow(
-                """
-                INSERT INTO nodes (hostname, ip_address, mac_address, os,
-                                   cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                                   gpu_model, location, owner, notes,
-                                   status, last_heartbeat, last_checked)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', '', '',
-                        'online', now(), now())
-                RETURNING id
-                """,
+                query,
                 specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb, json.dumps(specs.drives),
-                specs.gpu_model,
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb,
+                json.dumps(specs.drives), specs.gpu_model
             )
 
     return {"status": "registered", "hostname": specs.hostname, "id": row["id"]}
 
 
-@app.post("/online")
-async def online():
-    return {"ping": "pong"}
+# ---------------------------------------------------
+# Update endpoints
+# ---------------------------------------------------
+@app.get("/update")
+async def get_update(request: Request, hash: Optional[str] = Query(None)):
+    """
+    Return signed payload only if there is a newer version.
+    Request param: ?hash=<local_base64_hash>
+    """
+    pool = request.app.state.db_pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT version, code, signature, hash
+               FROM payloads
+               ORDER BY version DESC
+               LIMIT 1"""
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="No payload found")
+
+        version = row["version"]
+        code = row["code"]
+        signature = row["signature"]
+        stored_hash = row["hash"]
+
+        if hash and hash == stored_hash:
+            # client already has latest
+            return {}
+
+        return JSONResponse({
+            "version": str(version),
+            "signature": signature,
+            "hash": stored_hash,
+            "code": code,
+        })
+
+
+@app.get("/public_key")
+async def get_public_key():
+    """Serve the public RSA key (hard-coded for integrity)."""
+    return JSONResponse({
+        "public_key": """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8sPfrF4g6PreceYsXlFm
+8EfXnbrVw357XIONBw944ltP708tnM4bRUBHlVoKdHigmoTjWgiz3IsKozOWsydp
+qcQWB/ooQKqi4/Quvy1H5f2MFdlLZnyFPZOsW4Cq6X7ngtyxM0+WpDkU4EMBgwuL
+Zwvqx1UYeh0prRqEsR4x766NjYDklaSf6Xbj4GQRrYkWRi3Up47cRD3GIH33AhbJ
+AwlxqefLHeicMAT5s+povQGjnLizKqNgLFjIzaMfKbAifQ6jfvq/pG7WWcUSkZ4c
+p1IdGVbcH50OtxwKervSH1QDhF4Es2O9gHK/+admpSTko7fK7wHc5fk/anH2Hzzl
+nwIDAQAB
+-----END PUBLIC KEY-----"""
+    })
