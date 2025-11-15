@@ -36,7 +36,12 @@ async def lifespan(app: FastAPI):
     await app.state.db_pool.close()
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None
+)
 
 
 # ---------------------------------------------------
@@ -53,10 +58,6 @@ class NodeSpecs(BaseModel):
     storage_gb: Optional[float] = None
     drives: Optional[Dict[str, float]] = None
     gpu_model: Optional[str] = None
-    location: Optional[str] = None
-    owner: Optional[str] = None
-    notes: Optional[str] = None
-
 
 # ---------------------------------------------------
 # Utility
@@ -65,6 +66,15 @@ def compute_hash(code: str) -> str:
     """Compute base64 SHA256 hash of given code string."""
     h = hashlib.sha256(code.encode("utf-8")).digest()
     return base64.b64encode(h).decode()
+
+async def log_field_change(conn, node_id, field, old, new):
+    if old == new:
+        return
+    await conn.execute("""
+        INSERT INTO node_change_log (node_id, field_name, old_value, new_value, changed_at)
+        VALUES ($1, $2, $3, $4, now())
+    """, node_id, field, str(old) if old is not None else None,
+                       str(new) if new is not None else None)
 
 
 # ---------------------------------------------------
@@ -102,67 +112,140 @@ async def heartbeat(request: Request, id: str):
 
 @app.post("/register")
 async def register(specs: NodeSpecs, request: Request):
-    """Insert or update full device specifications and return the row ID."""
-    forbidden = [f for f in ("owner", "notes", "location") if getattr(specs, f)]
-    if forbidden:
-        raise HTTPException(
-            status_code=400,
-            detail=f"The following fields must be empty: {', '.join(forbidden)}"
-        )
-
     pool = request.app.state.db_pool
     async with pool.acquire() as conn:
+
+        # --------------------------
+        # fetch old row if id exists
+        # --------------------------
+        old_row = None
+        if getattr(specs, "id", None):
+            old_row = await conn.fetchrow("SELECT * FROM nodes WHERE id=$1", specs.id)
+
+        # --------------------------
+        # insert/update nodes table
+        # --------------------------
         if getattr(specs, "id", None):
             query = """
-                    INSERT INTO nodes (id, hostname, ip_address, mac_address, os,
-                                       cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                                       gpu_model, location, owner, notes,
-                                       status, last_heartbeat, last_checked)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '', '', '',
-                            'online', now(), now())
-                    ON CONFLICT (id)
-                        DO UPDATE SET hostname=$2,
-                                      ip_address=$3,
-                                      mac_address=$4,
-                                      os=$5,
-                                      cpu_model=$6,
-                                      cpu_cores=$7,
-                                      memory_gb=$8,
-                                      storage_gb=$9,
-                                      drives=$10,
-                                      gpu_model=$11,
-                                      location='',
-                                      owner='',
-                                      notes='',
-                                      status='online',
-                                      last_heartbeat=now(),
-                                      last_checked=now()
-                    RETURNING id \
-                    """
+                INSERT INTO nodes (
+                    id, hostname, ip_address, mac_address, os,
+                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                    gpu_model, location, owner, notes,
+                    status, last_heartbeat, last_checked
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10,
+                    $11, '', '', '',
+                    'online', now(), now()
+                )
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    hostname      = COALESCE(EXCLUDED.hostname, nodes.hostname),
+                    ip_address    = COALESCE(EXCLUDED.ip_address, nodes.ip_address),
+                    mac_address   = COALESCE(EXCLUDED.mac_address, nodes.mac_address),
+                    os            = COALESCE(EXCLUDED.os, nodes.os),
+                    cpu_model     = COALESCE(EXCLUDED.cpu_model, nodes.cpu_model),
+                    cpu_cores     = COALESCE(EXCLUDED.cpu_cores, nodes.cpu_cores),
+                    memory_gb     = COALESCE(EXCLUDED.memory_gb, nodes.memory_gb),
+                    storage_gb    = COALESCE(EXCLUDED.storage_gb, nodes.storage_gb),
+                    drives        = COALESCE(EXCLUDED.drives, nodes.drives),
+                    gpu_model     = COALESCE(EXCLUDED.gpu_model, nodes.gpu_model),
+                    status        = 'online',
+                    last_heartbeat= now(),
+                    last_checked  = now()
+                RETURNING *
+            """
+
             row = await conn.fetchrow(
                 query,
                 specs.id, specs.hostname, specs.ip_address, specs.mac_address,
                 specs.os, specs.cpu_model, specs.cpu_cores, specs.memory_gb,
-                specs.storage_gb, json.dumps(specs.drives), specs.gpu_model
+                specs.storage_gb,
+                json.dumps(specs.drives) if specs.drives is not None else None,
+                specs.gpu_model
             )
+
         else:
             query = """
-                    INSERT INTO nodes (hostname, ip_address, mac_address, os,
-                                       cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                                       gpu_model, location, owner, notes,
-                                       status, last_heartbeat, last_checked)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', '', '',
-                            'online', now(), now())
-                    RETURNING id \
-                    """
+                INSERT INTO nodes (
+                    hostname, ip_address, mac_address, os,
+                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                    gpu_model, location, owner, notes,
+                    status, last_heartbeat, last_checked
+                )
+                VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7, $8, $9,
+                    $10, '', '', '',
+                    'online', now(), now()
+                )
+                RETURNING *
+            """
+
             row = await conn.fetchrow(
                 query,
                 specs.hostname, specs.ip_address, specs.mac_address, specs.os,
-                specs.cpu_model, specs.cpu_cores, specs.memory_gb, specs.storage_gb,
-                json.dumps(specs.drives), specs.gpu_model
+                specs.cpu_model, specs.cpu_cores, specs.memory_gb,
+                specs.storage_gb,
+                json.dumps(specs.drives) if specs.drives is not None else None,
+                specs.gpu_model
             )
 
-    return {"status": "registered", "hostname": specs.hostname, "id": row["id"]}
+        # --------------------------
+        # diff log (only when old row exists)
+        # --------------------------
+        if old_row:
+            fields = [
+                "hostname", "ip_address", "mac_address", "os",
+                "cpu_model", "cpu_cores", "memory_gb", "storage_gb",
+                "drives", "gpu_model", "status"
+            ]
+
+            for f in fields:
+                old = old_row[f]
+                new = row[f]
+                await log_field_change(conn, row["id"], f, old, new)
+
+    return {"status": "registered", "hostname": row["hostname"], "id": row["id"]}
+
+
+@app.post("/logoff")
+async def logoff(id: str, request: Request):
+    pool = request.app.state.db_pool
+    async with pool.acquire() as conn:
+
+        # fetch current status
+        old = await conn.fetchrow("""
+            SELECT status
+            FROM nodes
+            WHERE id = $1
+        """, id)
+
+        if not old:
+            raise HTTPException(status_code=404, detail="Node ID not found")
+
+        old_status = old["status"]
+
+        # only update + log if status actually changes
+        if old_status != "offline":
+            await conn.execute("""
+                UPDATE nodes
+                SET status = 'offline',
+                    last_checked = now()
+                WHERE id = $1
+            """, id)
+
+            # log only real transitions
+            await log_field_change(
+                conn, id,
+                "status",
+                old_status,
+                "offline"
+            )
+
+    return {"status": "offline", "id": id}
+
 
 
 # ---------------------------------------------------
