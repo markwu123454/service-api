@@ -48,6 +48,7 @@ app = FastAPI(
 # Models
 # ---------------------------------------------------
 class NodeSpecs(BaseModel):
+    id: Optional[str] = None
     hostname: str
     ip_address: str
     mac_address: Optional[str] = None
