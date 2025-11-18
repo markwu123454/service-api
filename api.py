@@ -1,7 +1,8 @@
+import asyncio
 import json
 import base64
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from typing import Dict, Optional
 import asyncpg
@@ -31,9 +32,34 @@ VERSION_FALLBACK = "0.0.0"  # used if DB empty
 async def lifespan(app: FastAPI):
     print("Starting up...")
     app.state.db_pool = await asyncpg.create_pool(DB_URL)
+
+    # -----------------------------
+    # BACKGROUND OFFLINE SCANNER
+    # -----------------------------
+    async def offline_scanner():
+        while True:
+            try:
+                async with app.state.db_pool.acquire() as conn:
+                    await conn.execute("""
+                        UPDATE nodes
+                        SET status='offline', last_checked=now()
+                        WHERE last_heartbeat < (now() - interval '11 minutes')
+                          AND status != 'offline'
+                    """)
+            except Exception as e:
+                print("offline_scanner error:", e)
+
+            await asyncio.sleep(30)
+
+    # start task
+    app.state.scanner_task = asyncio.create_task(offline_scanner())
+
     yield
+
     print("Shutting down...")
+    app.state.scanner_task.cancel()
     await app.state.db_pool.close()
+
 
 
 app = FastAPI(
