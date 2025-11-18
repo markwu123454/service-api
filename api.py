@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print("offline_scanner error:", e)
 
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
 
     # start task
     app.state.scanner_task = asyncio.create_task(offline_scanner())
