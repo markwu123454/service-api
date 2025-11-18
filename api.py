@@ -40,16 +40,32 @@ async def lifespan(app: FastAPI):
         while True:
             try:
                 async with app.state.db_pool.acquire() as conn:
-                    await conn.execute("""
-                        UPDATE nodes
-                        SET status='offline', last_checked=now()
-                        WHERE last_heartbeat < (now() - interval '11 minutes')
-                          AND status != 'offline'
-                    """)
+                    rows = await conn.fetch("""
+                                            SELECT id, status
+                                            FROM nodes
+                                            WHERE last_heartbeat < (now() - interval '11 minutes')
+                                              AND status != 'offline'
+                                            """)
+
+                    for r in rows:
+                        node_id = r["id"]
+                        old_status = r["status"]
+
+                        # Perform update
+                        await conn.execute("""
+                                           UPDATE nodes
+                                           SET status='offline',
+                                               last_checked=now()
+                                           WHERE id = $1
+                                           """, node_id)
+
+                        # Log transition
+                        await log_field_change(conn, node_id, "status", old_status, "offline")
+
             except Exception as e:
                 print("offline_scanner error:", e)
 
-            await asyncio.sleep(60)
+            await asyncio.sleep(90)
 
     # start task
     app.state.scanner_task = asyncio.create_task(offline_scanner())
