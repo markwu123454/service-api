@@ -138,22 +138,32 @@ async def ping():
 
 @app.post("/heartbeat")
 async def heartbeat(request: Request, id: str):
-    """Update only last_heartbeat and status for an existing node."""
     pool = request.app.state.db_pool
     async with pool.acquire() as conn:
-        result = await conn.execute(
-            """
+
+        old_row = await conn.fetchrow("""
+            SELECT status
+            FROM nodes
+            WHERE id=$1
+        """, id)
+
+        if not old_row:
+            raise HTTPException(status_code=404, detail="Node ID not found")
+
+        old_status = old_row["status"]
+
+        await conn.execute("""
             UPDATE nodes
-            SET last_heartbeat = $2,
-                status         = 'online'
+            SET last_heartbeat = now(),
+                status = 'online'
             WHERE id = $1
-            """,
-            id,
-            datetime.utcnow(),
-        )
-    if result == "UPDATE 0":
-        raise HTTPException(status_code=404, detail="Node ID not found")
+        """, id)
+
+        if old_status != "online":
+            await log_field_change(conn, id, "status", old_status, "online")
+
     return {"status": "updated", "id": id}
+
 
 
 @app.post("/register")
@@ -161,44 +171,39 @@ async def register(specs: NodeSpecs, request: Request):
     pool = request.app.state.db_pool
     async with pool.acquire() as conn:
 
-        # --------------------------
-        # fetch old row if id exists
-        # --------------------------
         old_row = None
         if getattr(specs, "id", None):
             old_row = await conn.fetchrow("SELECT * FROM nodes WHERE id=$1", specs.id)
 
-        # --------------------------
-        # insert/update nodes table
-        # --------------------------
         if getattr(specs, "id", None):
             query = """
-                    INSERT INTO nodes (id, hostname, ip_address, mac_address, os,
-                                       cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                                       gpu_model, version, location, owner, notes,
-                                       status, last_heartbeat, last_checked)
-                    VALUES ($1, $2, $3, $4, $5,
-                            $6, $7, $8, $9, $10,
-                            $11, $12, '', '', '',
-                            'online', now(), now())
-                    ON CONFLICT (id)
-                        DO UPDATE SET hostname      = COALESCE(EXCLUDED.hostname, nodes.hostname),
-                                      ip_address    = COALESCE(EXCLUDED.ip_address, nodes.ip_address),
-                                      mac_address   = COALESCE(EXCLUDED.mac_address, nodes.mac_address),
-                                      os            = COALESCE(EXCLUDED.os, nodes.os),
-                                      cpu_model     = COALESCE(EXCLUDED.cpu_model, nodes.cpu_model),
-                                      cpu_cores     = COALESCE(EXCLUDED.cpu_cores, nodes.cpu_cores),
-                                      memory_gb     = COALESCE(EXCLUDED.memory_gb, nodes.memory_gb),
-                                      storage_gb    = COALESCE(EXCLUDED.storage_gb, nodes.storage_gb),
-                                      drives        = COALESCE(EXCLUDED.drives, nodes.drives),
-                                      gpu_model     = COALESCE(EXCLUDED.gpu_model, nodes.gpu_model),
-                                      version       = COALESCE(EXCLUDED.version, nodes.version), -- NEW
-                                      status        = 'online',
-                                      last_heartbeat= now(),
-                                      last_checked  = now()
-                    RETURNING *
-                    """
-
+                INSERT INTO nodes (
+                    id, hostname, ip_address, mac_address, os,
+                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                    gpu_model, version, location, owner, notes,
+                    status, last_heartbeat, last_checked
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10,
+                    $11, $12, '', '', '',
+                    'offline', NULL, NULL
+                )
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    hostname      = COALESCE(EXCLUDED.hostname, nodes.hostname),
+                    ip_address    = COALESCE(EXCLUDED.ip_address, nodes.ip_address),
+                    mac_address   = COALESCE(EXCLUDED.mac_address, nodes.mac_address),
+                    os            = COALESCE(EXCLUDED.os, nodes.os),
+                    cpu_model     = COALESCE(EXCLUDED.cpu_model, nodes.cpu_model),
+                    cpu_cores     = COALESCE(EXCLUDED.cpu_cores, nodes.cpu_cores),
+                    memory_gb     = COALESCE(EXCLUDED.memory_gb, nodes.memory_gb),
+                    storage_gb    = COALESCE(EXCLUDED.storage_gb, nodes.storage_gb),
+                    drives        = COALESCE(EXCLUDED.drives, nodes.drives),
+                    gpu_model     = COALESCE(EXCLUDED.gpu_model, nodes.gpu_model),
+                    version       = COALESCE(EXCLUDED.version, nodes.version)
+                RETURNING *
+            """
             row = await conn.fetchrow(
                 query,
                 specs.id,
@@ -217,17 +222,20 @@ async def register(specs: NodeSpecs, request: Request):
 
         else:
             query = """
-                    INSERT INTO nodes (hostname, ip_address, mac_address, os,
-                                       cpu_model, cpu_cores, memory_gb, storage_gb, drives,
-                                       gpu_model, version, location, owner, notes,
-                                       status, last_heartbeat, last_checked)
-                    VALUES ($1, $2, $3, $4,
-                            $5, $6, $7, $8, $9,
-                            $10, $11, '', '', '',
-                            'online', now(), now())
-                    RETURNING *
-                    """
-
+                INSERT INTO nodes (
+                    hostname, ip_address, mac_address, os,
+                    cpu_model, cpu_cores, memory_gb, storage_gb, drives,
+                    gpu_model, version, location, owner, notes,
+                    status, last_heartbeat, last_checked
+                )
+                VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7, $8, $9,
+                    $10, $11, '', '', '',
+                    'offline', NULL, NULL
+                )
+                RETURNING *
+            """
             row = await conn.fetchrow(
                 query,
                 specs.hostname,
@@ -242,22 +250,21 @@ async def register(specs: NodeSpecs, request: Request):
                 specs.gpu_model,
                 specs.version
             )
-        # --------------------------
-        # diff log (only when old row exists)
-        # --------------------------
+
+        # no status logging
         if old_row:
             fields = [
                 "hostname", "ip_address", "mac_address", "os",
                 "cpu_model", "cpu_cores", "memory_gb", "storage_gb",
-                "drives", "gpu_model", "version", "status"
+                "drives", "gpu_model", "version"
             ]
-
             for f in fields:
                 old = old_row[f]
                 new = row[f]
                 await log_field_change(conn, row["id"], f, old, new)
 
     return {"status": "registered", "hostname": row["hostname"], "id": row["id"]}
+
 
 
 @app.post("/logoff")
