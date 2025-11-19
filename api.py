@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
                     rows = await conn.fetch("""
                                             SELECT id, status
                                             FROM nodes
-                                            WHERE last_heartbeat < (now() - interval '11 minutes')
+                                            WHERE last_heartbeat < (now() - interval '70 seconds')
                                               AND status != 'offline'
                                             """)
 
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print("offline_scanner error:", e)
 
-            await asyncio.sleep(90)
+            await asyncio.sleep(15)
 
     # start task
     app.state.scanner_task = asyncio.create_task(offline_scanner())
