@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
                     rows = await conn.fetch("""
                                             SELECT id, status
                                             FROM nodes
-                                            WHERE last_heartbeat < (now() - interval '70 seconds')
+                                            WHERE last_heartbeat < (now() - interval '300 seconds')
                                               AND status != 'offline'
                                             """)
 
